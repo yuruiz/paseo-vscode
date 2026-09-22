@@ -1,0 +1,16 @@
+node_modules/
+.dev/
+.cache/
+.env
+.env.*
+.npmrc
+*.log
+*.tgz
+*.key
+*.sqlite
+*.sqlite-*
+*.db
+connection.json
+connection-token
+editor-data/
+.DS_Store
