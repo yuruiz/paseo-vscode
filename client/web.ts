@@ -94,9 +94,27 @@ interface EditorStatus {
 interface Binding {
   anchor: WebElement;
   onStatus(status: EditorStatus): void;
+  onRelease(): void;
   openExternal(url: string): void;
 }
+export interface EditorSessionInfo {
+  hostId: string;
+  workspaceId: string;
+  name: string;
+  directory: string;
+}
+export interface EditorSession extends EditorSessionInfo {
+  sessionKey: string;
+  instanceId: number;
+  visible: boolean;
+  failed: boolean;
+  popupFailed: boolean;
+  lastActiveAt: number;
+}
 interface ResidentEditor {
+  info: EditorSessionInfo;
+  instanceId: number;
+  lastActiveAt: number;
   url: string;
   surface: WebElement;
   guest: EditorGuest;
@@ -112,11 +130,52 @@ interface ResidentEditor {
 // not a global cache shared with another daemon or another installed plugin ID.
 const editors = new Map<string, ResidentEditor>();
 let frame: number | null = null;
+let nextInstanceId = 0;
+let sessions: readonly EditorSession[] = [];
+const subscribers = new Set<() => void>();
+
+export function getEditorSessions(): readonly EditorSession[] {
+  return sessions;
+}
+
+export function subscribeEditorSessions(listener: () => void): () => void {
+  subscribers.add(listener);
+  return () => {
+    subscribers.delete(listener);
+  };
+}
+
+function publishSessions() {
+  // A cached snapshot is required by useSyncExternalStore. Never include the
+  // editor URL: it can contain credentials and is not needed to manage a guest.
+  const next = [...editors].map(
+    ([sessionKey, editor]): EditorSession => ({
+      ...editor.info,
+      sessionKey,
+      instanceId: editor.instanceId,
+      visible: editor.geometry !== null,
+      ...editor.status,
+      lastActiveAt: editor.lastActiveAt,
+    }),
+  );
+  if (
+    next.length === sessions.length &&
+    next.every((item, index) =>
+      (Object.keys(item) as (keyof EditorSession)[]).every(
+        (key) => item[key] === sessions[index][key],
+      ),
+    )
+  )
+    return;
+  sessions = next;
+  for (const listener of subscribers) listener();
+}
 
 function publish(editor: ResidentEditor, patch: Partial<EditorStatus>) {
   if (editor.disposed) return;
   editor.status = { ...editor.status, ...patch };
   for (const binding of editor.bindings) binding.onStatus(editor.status);
+  publishSessions();
 }
 
 function park(editor: ResidentEditor) {
@@ -126,6 +185,7 @@ function park(editor: ResidentEditor) {
   editor.surface.style.visibility = "hidden";
   editor.surface.style.pointerEvents = "none";
   editor.surface.setAttribute("aria-hidden", "true");
+  publishSessions();
 }
 
 function visibleBounds(
@@ -185,7 +245,9 @@ function present(web: WebEnvironment, editor: ResidentEditor) {
     clip.height,
   ]);
   if (geometry === editor.geometry) return;
+  const wasHidden = editor.geometry === null;
   editor.geometry = geometry;
+  if (wasHidden) editor.lastActiveAt = Date.now();
   Object.assign(editor.surface.style, {
     left: `${clip.left}px`,
     top: `${clip.top}px`,
@@ -201,6 +263,7 @@ function present(web: WebEnvironment, editor: ResidentEditor) {
     height: `${bounds.height}px`,
   });
   editor.surface.setAttribute("aria-hidden", "false");
+  if (wasHidden) publishSessions();
 }
 
 function updateSurfaces() {
@@ -222,6 +285,7 @@ function createEditor(
   web: WebEnvironment,
   url: string,
   openExternal: (url: string) => void,
+  info: EditorSessionInfo,
 ): ResidentEditor {
   const surface = web.document.createElement("div");
   surface.setAttribute("data-paseo-vscode-session", "");
@@ -251,6 +315,9 @@ function createEditor(
     border: "0",
   });
   const editor: ResidentEditor = {
+    info,
+    instanceId: ++nextInstanceId,
+    lastActiveAt: Date.now(),
     url,
     surface,
     guest,
@@ -308,20 +375,24 @@ function createEditor(
 }
 
 function destroyEditor(editor: ResidentEditor) {
-  park(editor);
   editor.disposed = true;
+  editor.guest.blur();
   editor.disposeEvents();
-  editor.bindings.clear();
   editor.surface.remove();
+  for (const binding of editor.bindings) binding.onRelease();
+  editor.bindings.clear();
 }
 
-export function releaseEditor(sessionKey: string): void {
-  if (Platform.OS !== "web") return;
+export function releaseEditor(sessionKey: string, instanceId?: number): boolean {
+  if (Platform.OS !== "web") return false;
   const editor = editors.get(sessionKey);
-  if (!editor) return;
-  destroyEditor(editor);
+  // A confirmation must not release a replacement opened in the meantime.
+  if (!editor || (instanceId !== undefined && editor.instanceId !== instanceId)) return false;
   editors.delete(sessionKey);
+  destroyEditor(editor);
+  publishSessions();
   stopIdleFrame();
+  return true;
 }
 
 function stopIdleFrame() {
@@ -336,15 +407,18 @@ export function disposeEditors(): void {
   if (Platform.OS !== "web") return;
   for (const editor of editors.values()) destroyEditor(editor);
   editors.clear();
+  publishSessions();
   stopIdleFrame();
 }
 
 export function attachEditor(input: {
   sessionKey: string;
+  info: EditorSessionInfo;
   url: string;
   anchor: WebElement;
   openExternal(url: string): void;
   onStatus(status: EditorStatus): void;
+  onRelease(): void;
 }): { detach(): void; reload(): void } | null {
   const web = environment();
   if (!web) return null;
@@ -355,18 +429,21 @@ export function attachEditor(input: {
     editor = undefined;
   }
   if (!editor) {
-    editor = createEditor(web, input.url, input.openExternal);
+    editor = createEditor(web, input.url, input.openExternal, input.info);
     editors.set(input.sessionKey, editor);
   }
   const resident = editor;
+  resident.info = input.info;
   const binding: Binding = {
     anchor: input.anchor,
     openExternal: input.openExternal,
     onStatus: input.onStatus,
+    onRelease: input.onRelease,
   };
   resident.bindings.add(binding);
   input.onStatus(resident.status);
   present(web, resident);
+  publishSessions();
   if (frame === null) frame = web.requestAnimationFrame(updateSurfaces);
   return {
     detach() {
@@ -385,11 +462,13 @@ export function attachEditor(input: {
 /** Only mounted by an Electron host (identified by its openBrowser capability). */
 export function EditorWebview({
   sessionKey,
+  info,
   url,
   theme,
   openExternal,
 }: {
   sessionKey: string;
+  info: EditorSessionInfo;
   url: string;
   theme: PluginTheme;
   openExternal: (url: string) => void;
@@ -403,17 +482,22 @@ export function EditorWebview({
     if (released || !anchor.current) return;
     const attached = attachEditor({
       sessionKey,
+      info,
       url,
       anchor: anchor.current,
       openExternal,
       onStatus: setStatus,
+      onRelease: () => {
+        setReleased(true);
+        setConfirmRelease(false);
+      },
     });
     lease.current = attached;
     return () => {
       attached?.detach();
       lease.current = null;
     };
-  }, [sessionKey, url, openExternal, released]);
+  }, [sessionKey, info, url, openExternal, released]);
   const retry = useCallback(() => lease.current?.reload(), []);
   const release = useCallback(() => {
     releaseEditor(sessionKey);

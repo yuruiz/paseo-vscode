@@ -2,11 +2,11 @@
 // Electron binary and a display; all generated files live under PASEO_TEST_ROOT.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron } from "playwright";
-import ts from "typescript";
+import { build } from "esbuild";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const output = path.resolve(process.env.PASEO_TEST_ROOT || path.join(root, ".dev/retention"));
@@ -14,9 +14,68 @@ const executablePath = process.env.PASEO_ELECTRON_PATH;
 assert.ok(executablePath, "Set PASEO_ELECTRON_PATH to your Electron executable");
 await mkdir(output, { recursive: true });
 await mkdir(path.join(output, "tmp"), { recursive: true });
-const compiled = ts.transpileModule(await readFile(path.join(root, "client/web.ts"), "utf8"), {
-  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-}).outputText;
+const bundle = await build({
+  stdin: {
+    resolveDir: root,
+    loader: "tsx",
+    contents: `
+      import { createElement } from 'react';
+      import { createRoot } from 'react-dom/client';
+      import * as retention from './client/web';
+      import { SessionsScreen } from './client/sessions';
+      window.retention = retention;
+      const theme = { colors: { foreground: '#f1f1f1', foregroundMuted: '#aaa', surface0: '#181818', surface1: '#303030', border: '#444' } };
+      let manager;
+      window.showManager = (compact = false) => {
+        manager ??= createRoot(document.querySelector('#manager'));
+        manager.render(createElement(SessionsScreen, {
+          theme, host: { id: 'fixture-host', label: 'Fixture host' }, layout: { compact, platform: 'web' },
+          openEditor: workspaceId => {
+            if (window.failOpen) throw new Error('Workspace removed');
+            window.openedWorkspace = workspaceId;
+          },
+        }));
+      };
+      window.showEditor = url => {
+        const editor = createRoot(document.querySelector('#slot'));
+        editor.render(createElement(retention.EditorWebview, {
+          sessionKey: 'mounted-editor', url, theme, openExternal: () => {},
+          info: { hostId: 'fixture-host', workspaceId: 'mounted', name: 'Mounted editor', directory: '/workspace/mounted' },
+        }));
+      };
+    `,
+  },
+  bundle: true,
+  write: false,
+  format: "iife",
+  platform: "browser",
+  plugins: [
+    {
+      name: "native-primitives",
+      setup(builder) {
+        builder.onResolve({ filter: /^react-native$/ }, () => ({
+          path: "react-native",
+          namespace: "fixture",
+        }));
+        // Only the host's layout primitives are adapted. Components, hooks, state,
+        // event handlers, the session registry, and Electron webviews are real.
+        builder.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
+          resolveDir: root,
+          loader: "js",
+          contents: `
+          import { createElement as h } from 'react';
+          export const Platform = { OS: 'web' };
+          export const View = ({children, style}) => h('div', {style: {display:'flex',flexDirection:'column',minWidth:0,...style}}, children);
+          export const Text = ({children, style, accessibilityRole}) => h('span', {style, role:accessibilityRole}, children);
+          export const Pressable = ({children, style, onPress, accessibilityLabel}) => h('button', {style, onClick:onPress, 'aria-label':accessibilityLabel}, children);
+          export const ScrollView = ({children, style, contentContainerStyle}) => h('div', {style:{overflow:'auto',...style}}, h(View, {style:contentContainerStyle}, children));
+        `,
+        }));
+      },
+    },
+  ],
+});
+const compiled = bundle.outputFiles[0].text;
 
 const main = path.join(output, "main.cjs");
 await writeFile(
@@ -30,7 +89,7 @@ app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock?.hide();
   const win = new BrowserWindow({ width: 1100, height: 850, show: false,
     webPreferences: { webviewTag: true, backgroundThrottling: false } });
-  await win.loadURL('data:text/html,' + encodeURIComponent('<style>body {margin:0} #slot {position:fixed;left:100px;top:90px;width:800px;height:600px}</style><input id="host" aria-label="Host composer"><div id="slot"></div>'));
+  await win.loadURL('data:text/html,' + encodeURIComponent('<style>body {margin:0;font-family:system-ui;background:#181818} #slot {position:fixed;left:100px;top:90px;width:800px;height:600px;display:flex;flex-direction:column} #manager {position:relative;z-index:2;background:#181818}</style><input id="host" aria-label="Host composer"><div id="slot"></div><div id="manager"></div>'));
   win.showInactive();
 });
 `,
@@ -66,19 +125,7 @@ try {
   const page = await app.firstWindow({ timeout: 15000 });
   await page.evaluate(
     ({ compiled, editorUrl }) => {
-      const module = { exports: {} };
-      // The manager uses real DOM and Electron guests; React is unused here.
-      // The sole runtime shim identifies the host platform as web.
-      new Function("require", "module", "exports", compiled)(
-        (name) => {
-          if (name === "react-native") return { Platform: { OS: "web" } };
-          if (name === "react") return {};
-          throw new Error(`Unexpected runtime import: ${name}`);
-        },
-        module,
-        module.exports,
-      );
-      window.retention = module.exports;
+      new Function(compiled)();
       window.bind = () => {
         const anchor = document.createElement("div");
         anchor.style.cssText = "width:100%;height:100%";
@@ -86,12 +133,19 @@ try {
         window.anchor = anchor;
         window.lease = window.retention.attachEditor({
           sessionKey: "fixture-workspace",
+          info: {
+            hostId: "fixture-host",
+            workspaceId: "fixture-workspace",
+            name: "Fixture workspace",
+            directory: "/workspace/fixture",
+          },
           url: editorUrl,
           anchor,
           openExternal: () => {},
           onStatus: (status) => {
             window.editorStatus = status;
           },
+          onRelease: () => {},
         });
       };
       window.bind();
@@ -108,6 +162,7 @@ try {
         return false;
       }
     },
+    undefined,
     { timeout: 15000 },
   );
   const original = await page.evaluate(async () => {
@@ -174,6 +229,57 @@ try {
   await page.evaluate(() => {
     window.lease.detach();
     window.anchor.remove();
+    window.showManager();
+  });
+  await page.getByText("1 active · Fixture host · This client", { exact: true }).waitFor();
+  await page.getByText(/Background · Last active/).waitFor();
+  await page
+    .getByRole("button", { name: "Open editor for Fixture workspace", exact: true })
+    .click();
+  assert.equal(await page.evaluate(() => window.openedWorkspace), "fixture-workspace");
+  await page.evaluate(() => {
+    window.failOpen = true;
+  });
+  await page
+    .getByRole("button", { name: "Open editor for Fixture workspace", exact: true })
+    .click();
+  await page.getByText(/Could not open this workspace/).waitFor();
+  await page.getByRole("button", { name: "Release Fixture workspace", exact: true }).click();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  assert.equal(await page.locator("webview").count(), 1);
+  await page.screenshot({ path: path.join(output, "sessions-wide.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => window.showManager(true));
+  await page.screenshot({ path: path.join(output, "sessions-compact.png") });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= 390), true);
+  await page.setViewportSize({ width: 1100, height: 850 });
+  await page.getByRole("button", { name: "Release Fixture workspace", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm release", exact: true }).click();
+  await page.getByText("No active VS Code sessions", { exact: true }).waitFor();
+  assert.equal(await page.locator("webview").count(), 0);
+  results.push(
+    "PASS: manager lists parked sessions, opens the workspace, handles navigation errors, cancels and confirms release, and fits a compact viewport",
+  );
+
+  await page.evaluate((editorUrl) => {
+    window.showEditor(editorUrl);
+  }, editorUrl);
+  await page.getByText("1 active · Fixture host · This client", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Release all…", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm release", exact: true }).click();
+  await page.getByText("No active VS Code sessions", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Open VS Code", exact: true }).waitFor();
+  assert.equal(await page.locator("webview").count(), 0);
+  // Move the manager out of the way to exercise the mounted panel's reopen button.
+  await page.evaluate(() => (document.querySelector("#manager").style.display = "none"));
+  await page.getByRole("button", { name: "Open VS Code", exact: true }).click();
+  await page.waitForFunction(() => window.retention.getEditorSessions().length === 1);
+  assert.equal(await page.locator("webview").count(), 1);
+  results.push(
+    "PASS: bulk release updates a mounted editor to Open VS Code and explicit reopen creates a new session",
+  );
+
+  await page.evaluate(() => {
     window.retention.disposeEditors();
   });
   assert.equal(await page.locator("webview").count(), 0);

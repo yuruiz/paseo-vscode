@@ -21,6 +21,16 @@ import { EditorWebview } from "./web";
 
 export function EditorPanel({ workspaceId, host, navigation, theme }: PluginWorkspacePanelProps) {
   const directory = useWorkspace(workspaceId, (workspace) => workspace.directory);
+  const name = useWorkspace(workspaceId, (workspace) => workspace.title ?? workspace.name);
+  const info = useMemo(
+    () => ({
+      hostId: host.id,
+      workspaceId,
+      name: name ?? workspaceId,
+      directory: directory ?? "",
+    }),
+    [host.id, workspaceId, name, directory],
+  );
   const launch = useRpc(openEditor);
   const settings = useSettings(connection);
   const editor = useQuery({
@@ -74,6 +84,7 @@ export function EditorPanel({ workspaceId, host, navigation, theme }: PluginWork
       <EditorWebview
         key={JSON.stringify([host.id, workspaceId])}
         sessionKey={JSON.stringify([host.id, workspaceId])}
+        info={info}
         url={editor.data.url}
         theme={theme}
         openExternal={openExternal}

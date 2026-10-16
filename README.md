@@ -21,7 +21,12 @@ panel eviction. Returning to VS Code restores that same page, including unsaved 
 cursor position, and open terminals. Hidden sessions continue to use memory. The plugin
 API does not report whether a panel unmounted because its tab closed or because Paseo
 reclaimed the panel, so closing a tab also keeps its editor session. Save your edits and
-choose **Release editor… → Release session** to free it. Plugin reload, disable, host
+choose **Release editor… → Release session** to free it. Open **VS Code sessions** in the
+sidebar, or **Manage VS Code sessions** in the Command Center, to see all retained editors
+on this client for the selected host. The page shows workspace paths, foreground/background
+state, and last active times; you can return to an editor or release individual sessions or
+all listed sessions after saving your edits. Releasing a page does not stop the remote editor
+server. Sessions on other clients are not listed. Plugin reload, disable, host
 disconnect, or quitting the desktop destroys retained pages. Changing the editor URL
 replaces that workspace's page when it is next opened.
 

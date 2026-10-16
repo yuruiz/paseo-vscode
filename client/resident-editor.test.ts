@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("react-native", () => ({ Platform: { OS: "web" } }));
 import { Platform } from "react-native";
-import { attachEditor, disposeEditors, releaseEditor } from "./web";
+import {
+  attachEditor,
+  disposeEditors,
+  releaseEditor,
+  getEditorSessions,
+  subscribeEditorSessions,
+} from "./web";
 
 class Element {
   style: Record<string, string> = {};
@@ -76,7 +82,16 @@ function tick() {
   for (const callback of callbacks) callback();
 }
 function attach(sessionKey = '["host-a","workspace-a"]', url = "https://editor.test/?folder=a") {
-  const options = { sessionKey, url, anchor: anchor(), openExternal: vi.fn(), onStatus: vi.fn() };
+  const [hostId, workspaceId] = JSON.parse(sessionKey) as string[];
+  const options = {
+    sessionKey,
+    info: { hostId, workspaceId, name: workspaceId, directory: `/workspaces/${workspaceId}` },
+    url,
+    anchor: anchor(),
+    openExternal: vi.fn(),
+    onStatus: vi.fn(),
+    onRelease: vi.fn(),
+  };
   return { ...options, lease: attachEditor(options)! };
 }
 
@@ -198,6 +213,8 @@ describe("resident editor lifecycle", () => {
     const first = attach();
     const oldGuest = guest();
     releaseEditor(first.sessionKey);
+    expect(first.onRelease).toHaveBeenCalledExactlyOnceWith();
+    expect(getEditorSessions()).toEqual([]);
     expect(oldGuest.isConnected).toBe(false);
     expect([...oldGuest.listeners.values()].every((listeners) => listeners.size === 0)).toBe(true);
     expect(frames.size).toBe(0);
@@ -266,14 +283,78 @@ describe("resident editor lifecycle", () => {
     expect(
       attachEditor({
         sessionKey: "native",
+        info: { hostId: "host-a", workspaceId: "native", name: "Native", directory: "" },
         url: "https://editor.test/",
         anchor: new Element("div"),
         openExternal: vi.fn(),
         onStatus: vi.fn(),
+        onRelease: vi.fn(),
       }),
     ).toBeNull();
     releaseEditor("native");
     disposeEditors();
     expect(frames.size).toBe(0);
+  });
+});
+
+describe("session manager snapshots", () => {
+  it("lists retained sessions without credentials and only notifies on meaningful changes", async () => {
+    const changed = vi.fn();
+    const unsubscribe = subscribeEditorSessions(changed);
+    const first = attach(undefined, "https://editor.test/?tkn=secret");
+    const active = getEditorSessions();
+    expect(active).toHaveLength(1);
+    expect(active[0]).toMatchObject({ ...first.info, visible: true, failed: false });
+    expect(JSON.stringify(active)).not.toContain("secret");
+    changed.mockClear();
+    first.anchor.bounds.left += 20;
+    tick();
+    expect(getEditorSessions()).toBe(active);
+    expect(changed).not.toHaveBeenCalled();
+    first.lease.detach();
+    expect(getEditorSessions()[0].visible).toBe(false);
+    expect(changed).toHaveBeenCalledTimes(1);
+    await guest().emit("render-process-gone");
+    expect(getEditorSessions()[0].failed).toBe(true);
+    unsubscribe();
+    changed.mockClear();
+    releaseEditor(first.sessionKey);
+    expect(changed).not.toHaveBeenCalled();
+  });
+
+  it("updates workspace metadata without replacing the guest", () => {
+    const first = attach();
+    const before = getEditorSessions()[0];
+    const webview = guest();
+    first.lease.detach();
+    attachEditor({
+      ...first,
+      anchor: anchor(),
+      info: { ...first.info, name: "Renamed", directory: "/renamed" },
+    });
+    expect(getEditorSessions()[0]).toMatchObject({
+      instanceId: before.instanceId,
+      name: "Renamed",
+      directory: "/renamed",
+    });
+    expect(guest()).toBe(webview);
+  });
+
+  it("does not release newly opened or replacement sessions with an older bulk confirmation", () => {
+    const first = attach();
+    attach('["host-a","workspace-b"]');
+    const confirmed = getEditorSessions();
+    first.lease.detach();
+    attach(first.sessionKey, "https://new-editor.test/");
+    attach('["host-a","workspace-c"]');
+    const released = confirmed.map((session) =>
+      releaseEditor(session.sessionKey, session.instanceId),
+    );
+    expect(released).toEqual([false, true]);
+    expect(getEditorSessions().map((session) => session.workspaceId)).toEqual([
+      "workspace-a",
+      "workspace-c",
+    ]);
+    expect(guest().isConnected).toBe(true);
   });
 });
