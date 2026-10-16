@@ -70,7 +70,15 @@ export function EditorPanel({ workspaceId, host, navigation, theme }: PluginWork
   if (open.isSuccess) buttonLabel = "Link copied";
   if (open.isPending) buttonLabel = "Opening…";
   if (editor.data && navigation?.openBrowser) {
-    return <EditorWebview url={editor.data.url} theme={theme} openExternal={openExternal} />;
+    return (
+      <EditorWebview
+        key={JSON.stringify([host.id, workspaceId])}
+        sessionKey={JSON.stringify([host.id, workspaceId])}
+        url={editor.data.url}
+        theme={theme}
+        openExternal={openExternal}
+      />
+    );
   }
   if (settings.status === "loading" || editor.isLoading)
     return <Text style={styles.text}>Opening VS Code…</Text>;

@@ -16,6 +16,15 @@ this plugin adds the Paseo integration; it does not download, start, or host the
 | OpenVSCode Server            | The same workspace host       | Serves the editor and runs file operations, terminals, Git, and remote extensions.            |
 | HTTPS reverse proxy          | In front of OpenVSCode Server | Provides an editor address reachable from your local computer. Tailscale Serve is one option. |
 
+On desktop, each opened workspace keeps one editor page alive across tab switches and
+panel eviction. Returning to VS Code restores that same page, including unsaved text,
+cursor position, and open terminals. Hidden sessions continue to use memory. The plugin
+API does not report whether a panel unmounted because its tab closed or because Paseo
+reclaimed the panel, so closing a tab also keeps its editor session. Save your edits and
+choose **Release editor… → Release session** to free it. Plugin reload, disable, host
+disconnect, or quitting the desktop destroys retained pages. Changing the editor URL
+replaces that workspace's page when it is next opened.
+
 The desktop connects directly to the editor over HTTPS and WebSocket. This connection is
 separate from its connection to the Paseo daemon: Paseo's TCP connection or relay does not
 forward editor traffic. Being able to connect to Paseo alone is not enough.

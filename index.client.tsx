@@ -1,4 +1,5 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
+import { disposeEditors } from "./client/web";
 import { EditorPanel, ConnectionSettings } from "./client/editor";
 
 export default function contribute(client: PluginClientContext) {
@@ -25,5 +26,5 @@ export default function contribute(client: PluginClientContext) {
       openPanel("review", { location: "workspace" });
     },
   });
-  return () => {};
+  return disposeEditors;
 }
