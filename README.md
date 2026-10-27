@@ -1,3 +1,6 @@
+> This plugin is now maintained in [paseo-plugins/vscode](https://github.com/yuruiz/paseo-plugins/tree/main/vscode).
+> Install with `paseo plugin add git:yuruiz/paseo-plugins:vscode`. Existing tags remain available for compatibility.
+
 # Paseo VS Code
 
 Open the current Paseo workspace in a full OpenVSCode Server editor inside a desktop tab.
